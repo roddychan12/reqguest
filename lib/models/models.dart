@@ -85,6 +85,16 @@ class RequestType {
       _i(j['id'])!, _s(j['name']) ?? '', _s(j['code']) ?? '', _i(j['department_id']), _i(j['workflow_id']));
 }
 
+/// A room, area or other place a request can be raised for.
+class Location {
+  Location(this.id, this.name, this.parentId);
+  final int id;
+  final String name;
+  final int? parentId;
+
+  factory Location.fromJson(Map<String, dynamic> j) => Location(_i(j['id'])!, _s(j['name']) ?? '', _i(j['parent_id']));
+}
+
 class Req {
   Req({
     required this.id,

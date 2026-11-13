@@ -24,6 +24,8 @@ class AppState extends ChangeNotifier {
   AppState(this.api, this._prefs) {
     api.onUnauthorized = () {
       _stopPolling();
+      _gen++;
+      _reset();
       phase = Phase.signedOut;
       notifyListeners();
     };
@@ -52,6 +54,9 @@ class AppState extends ChangeNotifier {
   final Map<int, RequestType> types = {};
   List<Staff> staff = [];
 
+  /// Places requests can be raised for; loaded the first time the new-request form opens.
+  List<Location> locations = [];
+
   /// Every tenant request, and the chat events loaded for each.
   final Map<int, Req> _all = {};
   final Map<int, List<ChatEvent>> events = {};
@@ -63,6 +68,25 @@ class AppState extends ChangeNotifier {
 
   Timer? _poll;
   bool _polling = false;
+
+  /// Bumped whenever the session or workspace changes, so responses that were
+  /// in flight for the previous one are dropped instead of mixed in.
+  int _gen = 0;
+
+  /// Per-request load counter: only the newest load of a chat may write its events.
+  final Map<int, int> _eventSeq = {};
+
+  /// When the app last changed a request itself, so an older poll cannot overwrite it.
+  final Map<int, DateTime> _localChange = {};
+
+  /// Requests whose chat failed to load on the last attempt.
+  final Set<int> _eventErrors = {};
+
+  /// Round-robin position for refreshing open chats during polls.
+  int _rr = 0;
+
+  /// True when the last background refresh failed (shown as an offline hint).
+  bool syncFailed = false;
 
   // ── Settings (persisted per device) ────────────────────────────────────────
 
@@ -96,13 +120,13 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> signIn(String server, String email, String password) async {
-    api.baseUrl = server;
-    await api.login(email, password);
+    await api.login(email, password, server: server);
     await _afterLogin();
   }
 
   Future<void> signOut() async {
     _stopPolling();
+    _gen++;
     await api.logout();
     _reset();
     phase = Phase.signedOut;
@@ -185,6 +209,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> selectTenant(Tenant t) async {
     _stopPolling();
+    _gen++;
     _reset(keepSession: true);
     tenant = t;
     api.tenantId = t.id;
@@ -198,11 +223,16 @@ class AppState extends ChangeNotifier {
       _startPolling();
     } on ApiException catch (e) {
       error = switch (e.status) {
-        403 => 'Your account is not allowed to view requests in ${t.name}. '
-            'Ask an administrator to give your role ReqGuest request access.',
+        403 =>
+          'Your account is not allowed to view requests in ${t.name}. '
+              'Ask an administrator to give your role ReqGuest request access.',
         404 => 'Workspace ${t.id} was not found on this server.',
         _ => e.message,
       };
+      phase = Phase.error;
+      notifyListeners();
+    } catch (_) {
+      error = 'Could not reach the server. Check the connection and try again.';
       phase = Phase.error;
       notifyListeners();
     }
@@ -222,6 +252,7 @@ class AppState extends ChangeNotifier {
 
   void switchWorkspace() {
     _stopPolling();
+    _gen++;
     phase = Phase.pickTenant;
     notifyListeners();
   }
@@ -237,6 +268,11 @@ class AppState extends ChangeNotifier {
     events.clear();
     assignments.clear();
     _loadedEvents.clear();
+    _eventSeq.clear();
+    _localChange.clear();
+    _eventErrors.clear();
+    locations = [];
+    syncFailed = false;
     if (!keepSession) {
       me = null;
       tenant = null;
@@ -257,24 +293,32 @@ class AppState extends ChangeNotifier {
       types[t.id] = t;
     }
     // Workflow detail includes statuses + transitions.
-    final wfs = await Future.wait(results[1].map((w) async {
-      try {
-        return await api.rg('GET', '/workflows/${w['id']}');
-      } on ApiException {
-        return null;
-      }
-    }));
+    final wfs = await Future.wait(
+      results[1].map((w) async {
+        try {
+          return await api.rg('GET', '/workflows/${w['id']}');
+        } on ApiException {
+          return null;
+        }
+      }),
+    );
     for (final w in wfs.whereType<Map<String, dynamic>>()) {
       for (final s in ((w['statuses'] as List?) ?? const []).cast<Map<String, dynamic>>()) {
         final st = WfStatus.fromJson(s);
         statuses[st.id] = st;
       }
-      transitions.addAll(((w['transitions'] as List?) ?? const []).cast<Map<String, dynamic>>().map(WfTransition.fromJson));
+      transitions.addAll(
+        ((w['transitions'] as List?) ?? const []).cast<Map<String, dynamic>>().map(WfTransition.fromJson),
+      );
     }
     _resolveRole();
   }
 
-  void _applyTeam(List<Map<String, dynamic>> depts, List<Map<String, dynamic>> staffRows, List<Map<String, dynamic>> users) {
+  void _applyTeam(
+    List<Map<String, dynamic>> depts,
+    List<Map<String, dynamic>> staffRows,
+    List<Map<String, dynamic>> users,
+  ) {
     departments.clear();
     for (final d in depts.map(Department.fromJson)) {
       departments[d.id] = d;
@@ -289,18 +333,21 @@ class AppState extends ChangeNotifier {
 
   /// Reloads departments, staff and names (changed in the CMS) along with requests.
   Future<void> refreshTeam() async {
+    final gen = _gen;
     final results = await Future.wait([
       _optional(api.rgList('/departments')),
       _optional(api.rgAll('/staff')),
       _optional(api.users()),
     ]);
+    if (gen != _gen || me == null) return;
     _applyTeam(results[0], results[1], results[2]);
     _resolveRole();
-    await _loadRequests();
+    await refresh();
   }
 
   void _resolveRole() {
-    final m = me!;
+    final m = me;
+    if (m == null) return;
     m.staff = staff.where((s) => s.userId == m.userId).firstOrNull;
     userNames.putIfAbsent(m.userId, () => m.name);
     if (_meJson['is_superuser'] == true || _meJson['is_superuser'] == 1) {
@@ -315,7 +362,7 @@ class AppState extends ChangeNotifier {
     final names = (role != null ? [role] : roles)
         .map((r) => '${r['name'] ?? ''} ${r['display_name'] ?? ''}'.toLowerCase())
         .join(' ');
-    if (role?['is_superuser'] == 1 || names.contains('admin')) {
+    if (role?['is_superuser'] == 1 || role?['is_superuser'] == true || names.contains('admin')) {
       m.role = AppRole.admin;
     } else if (names.contains('supervisor') || names.contains('manager')) {
       m.role = AppRole.supervisor;
@@ -326,25 +373,69 @@ class AppState extends ChangeNotifier {
 
   // ── Requests & events ──────────────────────────────────────────────────────
 
-  Future<void> refresh() => _loadRequests();
+  /// Manual refresh (pull-to-refresh). Shares the poll guard so the two never overlap;
+  /// errors reach the caller so the screen can say what went wrong.
+  Future<void> refresh() async {
+    if (_polling) return;
+    _polling = true;
+    try {
+      await _loadRequests();
+      _setSync(true);
+    } catch (_) {
+      _setSync(false);
+      rethrow;
+    } finally {
+      _polling = false;
+    }
+  }
+
+  void _setSync(bool ok) {
+    if (syncFailed == ok) {
+      syncFailed = !ok;
+      notifyListeners();
+    }
+  }
+
+  /// Open chats re-read per poll on top of the ones whose status changed.
+  /// Comments do not bump updated_at, so every open chat is still visited in turn.
+  static const _rotatePerPoll = 8;
 
   Future<void> _loadRequests({bool initial = false}) async {
+    final gen = _gen;
+    final started = DateTime.now();
     final rows = (await api.rgAll('/requests')).map(Req.fromJson).toList();
+    if (gen != _gen) return;
     final changed = <int>[];
     final arrived = <Req>[];
     for (final r in rows) {
       final prev = _all[r.id];
+      final local = _localChange[r.id];
+      if (prev != null && local != null && local.isAfter(started)) continue;
       if (prev == null) {
         if (!initial) arrived.add(r);
         changed.add(r.id);
-      } else if (prev.updatedAt != r.updatedAt || prev.currentStatusId != r.currentStatusId || !isFinal(r)) {
-        // Comments do not bump updated_at, so open chats are always refreshed.
+      } else if (prev.updatedAt != r.updatedAt || prev.currentStatusId != r.currentStatusId) {
         changed.add(r.id);
       }
       _all[r.id] = r;
     }
-    _all.removeWhere((id, _) => !rows.any((r) => r.id == id));
+    final ids = {for (final r in rows) r.id};
+    _all.removeWhere((id, _) => !ids.contains(id));
+    for (final m in <Map<int, Object>>[events, assignments, _eventSeq, _localChange]) {
+      m.removeWhere((id, _) => !ids.contains(id));
+    }
+    _loadedEvents.removeWhere((id) => !ids.contains(id));
+    if (!initial) {
+      final open = _all.values.where((r) => !isFinal(r) && !changed.contains(r.id)).map((r) => r.id).toList()..sort();
+      if (open.isNotEmpty) {
+        for (var i = 0; i < _rotatePerPoll && i < open.length; i++) {
+          changed.add(open[(_rr + i) % open.length]);
+        }
+        _rr = (_rr + _rotatePerPoll) % open.length;
+      }
+    }
     await _loadEventsFor(changed);
+    if (gen != _gen) return;
     notifyListeners();
     for (final r in arrived) {
       if (isVisible(r) && onIncoming != null) onIncoming!(r);
@@ -359,14 +450,19 @@ class AppState extends ChangeNotifier {
   }
 
   /// Loads status history, assignments, comments and attachments for one request.
+  /// Never throws: a failure keeps the previous events and is remembered in [eventsFailed].
+  /// A list this account may not read (403) counts as empty, so the rest of the chat still shows.
   Future<void> loadEvents(int id) async {
+    final gen = _gen;
+    final seq = _eventSeq[id] = (_eventSeq[id] ?? 0) + 1;
     try {
       final r = await Future.wait([
-        api.rgList('/requests/$id/status-history'),
-        api.rgList('/requests/$id/assignments'),
-        api.rgList('/requests/$id/comments'),
-        api.rgList('/requests/$id/attachments'),
+        _optional(api.rgList('/requests/$id/status-history')),
+        _optional(api.rgList('/requests/$id/assignments')),
+        _optional(api.rgList('/requests/$id/comments')),
+        _optional(api.rgList('/requests/$id/attachments')),
       ]);
+      if (gen != _gen || seq != _eventSeq[id]) return;
       final list = <ChatEvent>[
         ...r[0].map(ChatEvent.fromHistory),
         ...r[1].map(ChatEvent.fromAssignment),
@@ -382,10 +478,14 @@ class AppState extends ChangeNotifier {
       events[id] = list;
       assignments[id] = r[1].map(Assignment.fromJson).toList();
       _loadedEvents.add(id);
-    } on ApiException {
+      _eventErrors.remove(id);
+    } catch (_) {
       // Keep whatever we had; the next poll retries.
+      if (gen == _gen) _eventErrors.add(id);
     }
   }
+
+  bool eventsFailed(int id) => _eventErrors.contains(id);
 
   void _startPolling() {
     _poll?.cancel();
@@ -394,7 +494,9 @@ class AppState extends ChangeNotifier {
       _polling = true;
       try {
         await _loadRequests();
+        _setSync(true);
       } catch (_) {
+        _setSync(false);
       } finally {
         _polling = false;
       }
@@ -452,7 +554,11 @@ class AppState extends ChangeNotifier {
   List<ChatEvent> eventsFor(int id) {
     final list = events[id] ?? const [];
     if (showInternal) return list;
-    return list.where((e) => !(e.kind == EventKind.comment && e.isInternal)).toList();
+    return list
+        .where(
+          (e) => !(e.kind == EventKind.comment && e.isInternal) || e.pending || (e.by != null && e.by == me?.userId),
+        )
+        .toList();
   }
 
   bool eventsLoaded(int id) => _loadedEvents.contains(id);
@@ -491,8 +597,11 @@ class AppState extends ChangeNotifier {
 
   // ── Unread ─────────────────────────────────────────────────────────────────
 
+  /// Read state belongs to one person in one workspace (front-desk phones are shared).
+  String get _scope => '${tenant?.id}_${me?.userId}';
+
   DateTime? _seenAt(int reqId) {
-    final ms = _prefs.getInt('seen_${tenant?.id}_$reqId');
+    final ms = _prefs.getInt('seen_${_scope}_$reqId');
     return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
   }
 
@@ -506,11 +615,14 @@ class AppState extends ChangeNotifier {
     return list.where((e) => e.at.isAfter(seen) && e.by != me?.userId).length;
   }
 
+  /// Remembers the newest server event seen. Server times are compared only with
+  /// server times, so a phone in another time zone or with a wrong clock still counts correctly.
   void markSeen(Req r) {
-    final last = lastEventAt(r);
-    final now = DateTime.now();
-    final at = last.isAfter(now) ? last : now;
-    _prefs.setInt('seen_${tenant?.id}_${r.id}', at.millisecondsSinceEpoch);
+    final confirmed = (events[r.id] ?? const <ChatEvent>[]).where((e) => !e.pending);
+    final at = confirmed.isEmpty ? (r.updatedAt ?? r.createdAt) : confirmed.last.at;
+    final prev = _seenAt(r.id);
+    if (prev != null && !at.isAfter(prev)) return;
+    _prefs.setInt('seen_${_scope}_${r.id}', at.millisecondsSinceEpoch);
     notifyListeners();
   }
 
@@ -519,11 +631,11 @@ class AppState extends ChangeNotifier {
   // ── Alerts ─────────────────────────────────────────────────────────────────
 
   DateTime? get _alertsReadAt {
-    final ms = _prefs.getInt('alerts_read_${tenant?.id}');
+    final ms = _prefs.getInt('alerts_read_$_scope');
     return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
   }
 
-  Set<String> get _readAlerts => (_prefs.getStringList('alerts_keys_${tenant?.id}') ?? const []).toSet();
+  Set<String> get _readAlerts => (_prefs.getStringList('alerts_keys_$_scope') ?? const []).toSet();
 
   List<Alert> get alerts {
     final out = <Alert>[];
@@ -548,14 +660,18 @@ class AppState extends ChangeNotifier {
   int get unreadAlerts => alerts.where(isAlertUnread).length;
 
   void markAlertRead(Alert a) {
-    final s = _readAlerts..add(a.key);
-    _prefs.setStringList('alerts_keys_${tenant?.id}', s.take(500).toList());
+    final keys = (_readAlerts..add(a.key)).toList();
+    // Keep the newest 500 so recently read alerts are never the ones dropped.
+    _prefs.setStringList('alerts_keys_$_scope', keys.skip(keys.length > 500 ? keys.length - 500 : 0).toList());
     notifyListeners();
   }
 
   void markAllAlertsRead() {
-    _prefs.setInt('alerts_read_${tenant?.id}', DateTime.now().millisecondsSinceEpoch);
-    _prefs.remove('alerts_keys_${tenant?.id}');
+    final list = alerts;
+    if (list.isEmpty) return;
+    // Newest alert time (server clock), not the phone's clock.
+    _prefs.setInt('alerts_read_$_scope', list.first.event.at.millisecondsSinceEpoch);
+    _prefs.remove('alerts_keys_$_scope');
     notifyListeners();
   }
 
@@ -564,10 +680,7 @@ class AppState extends ChangeNotifier {
   Req? byId(int id) => _all[id];
 
   Future<void> applyTransition(Req r, WfTransition t, {String? note}) async {
-    final res = await api.rg('POST', '/requests/${r.id}/transition', body: {
-      'transition_id': t.id,
-      'note': ?note,
-    });
+    final res = await api.rg('POST', '/requests/${r.id}/transition', body: {'transition_id': t.id, 'note': ?note});
     r.currentStatusId = (res is Map ? (res['current_status_id'] as num?)?.toInt() : null) ?? t.toStatusId;
     await _refreshOne(r.id);
   }
@@ -579,6 +692,12 @@ class AppState extends ChangeNotifier {
 
   /// Falls back to setting the status directly when no reverse edge exists.
   Future<void> undoTransition(Req r, WfTransition t) async {
+    final j = await api.rg('GET', '/requests/${r.id}');
+    final current = j is Map<String, dynamic> ? Req.fromJson(j).currentStatusId : r.currentStatusId;
+    if (current != t.toStatusId) {
+      await _refreshOne(r.id);
+      throw ApiException(409, 'This request has changed since, so it cannot be undone.');
+    }
     final rev = reverseOf(r, t);
     if (rev != null) {
       await applyTransition(r, rev, note: 'Undone');
@@ -590,8 +709,11 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> sendComment(Req r, String body, {required bool internal}) async {
-    final optimistic = ChatEvent.fromComment(
-        {'user_id': me?.userId, 'body': body, 'is_internal': internal ? 1 : 0}, pending: true);
+    final optimistic = ChatEvent.fromComment({
+      'user_id': me?.userId,
+      'body': body,
+      'is_internal': internal ? 1 : 0,
+    }, pending: true);
     events[r.id] = [...?events[r.id], optimistic];
     notifyListeners();
     try {
@@ -614,10 +736,65 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<List<Location>> loadLocations() async {
+    final rows = await api.rgAll('/locations');
+    locations = rows.map(Location.fromJson).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return locations;
+  }
+
+  /// Creates a request the same way the CMS does, then loads it so its chat can open straight away.
+  /// Returns the new request, or null if the server did not say which one it created.
+  Future<Req?> createRequest({
+    required String title,
+    required int requestTypeId,
+    required int locationId,
+    required int departmentId,
+    required int priority,
+    String? description,
+    String? requesterName,
+    String? requesterContact,
+    DateTime? dueAt,
+  }) async {
+    String? blank(String? v) => v == null || v.trim().isEmpty ? null : v.trim();
+    final res = await api.rg(
+      'POST',
+      '/requests',
+      body: {
+        'title': title.trim(),
+        'request_type_id': requestTypeId,
+        'location_id': locationId,
+        'department_id': departmentId,
+        'priority': priority,
+        'description': ?blank(description),
+        'requester_name': ?blank(requesterName),
+        'requester_contact': ?blank(requesterContact),
+        // The CMS sends due times in UTC as "YYYY-MM-DD HH:MM:SS".
+        'due_at': ?(dueAt == null ? null : _utcStamp(dueAt)),
+      },
+    );
+    final data = res is Map && res['data'] is Map ? res['data'] : res;
+    final id = data is Map ? (data['id'] as num?)?.toInt() : null;
+    if (id == null) {
+      await refresh();
+      return null;
+    }
+    await _refreshOne(id);
+    return _all[id];
+  }
+
+  static String _utcStamp(DateTime d) {
+    final u = d.toUtc();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${u.year}-${two(u.month)}-${two(u.day)} ${two(u.hour)}:${two(u.minute)}:${two(u.second)}';
+  }
+
   Future<void> _refreshOne(int id) async {
+    final gen = _gen;
+    _localChange[id] = DateTime.now();
     try {
       final j = await api.rg('GET', '/requests/$id');
-      if (j is Map<String, dynamic>) _all[id] = Req.fromJson(j);
+      if (gen == _gen && j is Map<String, dynamic>) _all[id] = Req.fromJson(j);
     } catch (_) {}
     await loadEvents(id);
     notifyListeners();
@@ -634,8 +811,8 @@ class AppState extends ChangeNotifier {
 
   /// Whether this user sees every open request of [deptId], so its counts are complete.
   bool seesAllOf(int? deptId) => switch (me?.role) {
-        AppRole.admin => true,
-        AppRole.supervisor => me!.departmentId == null || me!.departmentId == deptId,
-        _ => false,
-      };
+    AppRole.admin => true,
+    AppRole.supervisor => me?.departmentId == null || me?.departmentId == deptId,
+    _ => false,
+  };
 }

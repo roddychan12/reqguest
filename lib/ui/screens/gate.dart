@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:http/http.dart' show ClientException;
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
 
@@ -17,6 +18,12 @@ class Gate extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
+    if (s.phase != Phase.ready) {
+      // Signed out or switching workspace: close any chat or screen left open on top.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) Navigator.of(context).popUntil((r) => r.isFirst);
+      });
+    }
     return switch (s.phase) {
       Phase.booting || Phase.loading => const _Loading(),
       Phase.signedOut => const SignInScreen(),
@@ -42,11 +49,14 @@ class _Loading extends StatelessWidget {
     final c = RgColors.of(context);
     return Scaffold(
       body: Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Logo(height: 36),
-          const SizedBox(height: 24),
-          SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: c.brand)),
-        ]),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Logo(height: 36),
+            const SizedBox(height: 24),
+            SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: c.brand)),
+          ],
+        ),
       ),
     );
   }
@@ -63,12 +73,15 @@ class _ErrorScreen extends StatelessWidget {
         child: Center(
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              EmptyState(icon: Symbols.cloud_off_rounded, title: 'Could not load', message: message),
-              RgButton(label: 'Try Again', icon: Symbols.refresh_rounded, onPressed: s.retry),
-              const SizedBox(height: 8),
-              RgButton(label: 'Sign Out', variant: BtnVariant.ghost, onPressed: s.signOut),
-            ]),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                EmptyState(icon: Symbols.cloud_off_rounded, title: 'Could not load', message: message),
+                RgButton(label: 'Try Again', icon: Symbols.refresh_rounded, onPressed: s.retry),
+                const SizedBox(height: 8),
+                RgButton(label: 'Sign Out', variant: BtnVariant.ghost, onPressed: s.signOut),
+              ],
+            ),
           ),
         ),
       ),
@@ -89,9 +102,35 @@ class _SignInScreenState extends State<SignInScreen> {
   bool _busy = false, _showServer = false;
   String? _error;
 
+  @override
+  void dispose() {
+    _server.dispose();
+    _email.dispose();
+    _password.dispose();
+    super.dispose();
+  }
+
+  /// A usable server address, or null. An empty field means the default server.
+  String? _serverUrl() {
+    final raw = _server.text.trim();
+    if (raw.isEmpty) return kDefaultApiBase;
+    final uri = Uri.tryParse(raw);
+    if (uri == null || !(uri.scheme == 'https' || uri.scheme == 'http') || uri.host.isEmpty) return null;
+    return raw;
+  }
+
   Future<void> _submit() async {
+    if (_busy) return;
     if (_email.text.trim().isEmpty || _password.text.isEmpty) {
       setState(() => _error = 'Enter your email and password.');
+      return;
+    }
+    final server = _serverUrl();
+    if (server == null) {
+      setState(() {
+        _showServer = true;
+        _error = 'Enter the server address in full, for example https://hotel.example.com';
+      });
       return;
     }
     setState(() {
@@ -99,15 +138,21 @@ class _SignInScreenState extends State<SignInScreen> {
       _error = null;
     });
     try {
-      await context.read<AppState>().signIn(_server.text, _email.text.trim(), _password.text);
-    } on ApiException catch (e) {
-      setState(() => _error = e.message);
-    } catch (_) {
-      final host = Uri.tryParse(_server.text.trim())?.host ?? _server.text.trim();
-      setState(() => _error = kIsWeb
-          ? 'The browser blocked the request to $host. The server must allow this page’s origin '
-              '(${Uri.base.origin}) in CORS_ALLOWED_ORIGINS, or use the Android app.'
-          : 'Could not reach $host. Check the address and your connection.');
+      await context.read<AppState>().signIn(server, _email.text.trim(), _password.text);
+    } catch (e) {
+      final host = Uri.parse(server).host;
+      if (!mounted) return;
+      setState(
+        () => _error = switch (e) {
+          ApiException() => e.message,
+          // In a browser a blocked cross-site request looks the same as no connection.
+          ClientException() when kIsWeb =>
+            'The browser blocked the request to $host. The server must allow '
+                'this page’s origin (${Uri.base.origin}) in CORS_ALLOWED_ORIGINS, or use the mobile app.',
+          ClientException() => 'Could not reach $host. Check the address and your connection.',
+          _ => friendlyError(e),
+        },
+      );
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -123,42 +168,54 @@ class _SignInScreenState extends State<SignInScreen> {
             padding: const EdgeInsets.all(16),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 420),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                const Center(child: Logo(height: 40)),
-                const SizedBox(height: 12),
-                Text('Staff sign in',
-                    textAlign: TextAlign.center, style: RgType.subhead.copyWith(color: c.textSecondary)),
-                const SizedBox(height: 32),
-                RgCard(
-                  margin: EdgeInsets.zero,
-                  child: Column(children: [
-                    _Field(controller: _email, label: 'Email', keyboard: TextInputType.emailAddress),
-                    const Padding(padding: EdgeInsets.only(left: 14), child: Hairline()),
-                    _Field(controller: _password, label: 'Password', obscure: true, onSubmit: _submit),
-                    if (_showServer) ...[
-                      const Padding(padding: EdgeInsets.only(left: 14), child: Hairline()),
-                      _Field(controller: _server, label: 'Server', keyboard: TextInputType.url),
-                    ],
-                  ]),
-                ),
-                if (_error != null) ...[
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Center(child: Logo(height: 40)),
                   const SizedBox(height: 12),
-                  Row(children: [
-                    RgIcon(Symbols.error_rounded, size: 18, fill: true, color: c.dangerFg),
-                    const SizedBox(width: 6),
-                    Expanded(child: Text(_error!, style: RgType.footnote.copyWith(color: c.dangerFg))),
-                  ]),
+                  Text(
+                    'Staff sign in',
+                    textAlign: TextAlign.center,
+                    style: RgType.subhead.copyWith(color: c.textSecondary),
+                  ),
+                  const SizedBox(height: 32),
+                  RgCard(
+                    margin: EdgeInsets.zero,
+                    child: Column(
+                      children: [
+                        _Field(controller: _email, label: 'Email', keyboard: TextInputType.emailAddress),
+                        const Padding(padding: EdgeInsets.only(left: 14), child: Hairline()),
+                        _Field(controller: _password, label: 'Password', obscure: true, onSubmit: _submit),
+                        if (_showServer) ...[
+                          const Padding(padding: EdgeInsets.only(left: 14), child: Hairline()),
+                          _Field(controller: _server, label: 'Server', keyboard: TextInputType.url),
+                        ],
+                      ],
+                    ),
+                  ),
+                  if (_error != null) ...[
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        RgIcon(Symbols.error_rounded, size: 18, fill: true, color: c.dangerFg),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(_error!, style: RgType.footnote.copyWith(color: c.dangerFg)),
+                        ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 20),
+                  RgButton(label: 'Sign In', size: BtnSize.lg, expand: true, loading: _busy, onPressed: _submit),
+                  const SizedBox(height: 8),
+                  RgButton(
+                    label: _showServer ? 'Hide server' : 'Change server',
+                    variant: BtnVariant.ghost,
+                    size: BtnSize.sm,
+                    onPressed: () => setState(() => _showServer = !_showServer),
+                  ),
                 ],
-                const SizedBox(height: 20),
-                RgButton(label: 'Sign In', size: BtnSize.lg, expand: true, loading: _busy, onPressed: _submit),
-                const SizedBox(height: 8),
-                RgButton(
-                  label: _showServer ? 'Hide server' : 'Change server',
-                  variant: BtnVariant.ghost,
-                  size: BtnSize.sm,
-                  onPressed: () => setState(() => _showServer = !_showServer),
-                ),
-              ]),
+              ),
             ),
           ),
         ),
@@ -180,24 +237,29 @@ class _Field extends StatelessWidget {
     final c = RgColors.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-      child: Row(children: [
-        SizedBox(width: 90, child: Text(label, style: RgType.body.copyWith(color: c.textPrimary))),
-        Expanded(
-          child: TextField(
-            controller: controller,
-            obscureText: obscure,
-            keyboardType: keyboard,
-            autocorrect: false,
-            onSubmitted: onSubmit == null ? null : (_) => onSubmit!(),
-            style: RgType.body.copyWith(color: c.textPrimary),
-            decoration: InputDecoration(
-              border: InputBorder.none,
-              hintText: label == 'Server' ? 'https://host' : null,
-              hintStyle: TextStyle(color: c.textTertiary),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 90,
+            child: Text(label, style: RgType.body.copyWith(color: c.textPrimary)),
+          ),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              obscureText: obscure,
+              keyboardType: keyboard,
+              autocorrect: false,
+              onSubmitted: onSubmit == null ? null : (_) => onSubmit!(),
+              style: RgType.body.copyWith(color: c.textPrimary),
+              decoration: InputDecoration(
+                border: InputBorder.none,
+                hintText: label == 'Server' ? 'https://host' : null,
+                hintStyle: TextStyle(color: c.textTertiary),
+              ),
             ),
           ),
-        ),
-      ]),
+        ],
+      ),
     );
   }
 }
@@ -211,6 +273,12 @@ class TenantPicker extends StatefulWidget {
 class _TenantPickerState extends State<TenantPicker> {
   final _id = TextEditingController();
   String? _error;
+
+  @override
+  void dispose() {
+    _id.dispose();
+    super.dispose();
+  }
 
   void _open() {
     final id = int.tryParse(_id.text.trim());
@@ -228,63 +296,76 @@ class _TenantPickerState extends State<TenantPicker> {
     if (s.tenants.isEmpty) {
       return Scaffold(
         body: SafeArea(
-          child: ListView(padding: const EdgeInsets.symmetric(horizontal: 16), children: [
-            const Padding(padding: EdgeInsets.only(top: 36, bottom: 8), child: LargeTitle('Workspace')),
-            Text(
-              'Your account cannot list workspaces. Enter the workspace number to open it.',
-              style: RgType.subhead.copyWith(color: c.textSecondary),
-            ),
-            const SizedBox(height: 16),
-            RgCard(
-              margin: EdgeInsets.zero,
-              child: _Field(controller: _id, label: 'Number', keyboard: TextInputType.number, onSubmit: _open),
-            ),
-            if (_error != null) ...[
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            children: [
+              const Padding(padding: EdgeInsets.only(top: 36, bottom: 8), child: LargeTitle('Workspace')),
+              Text(
+                'Your account cannot list workspaces. Enter the workspace number to open it.',
+                style: RgType.subhead.copyWith(color: c.textSecondary),
+              ),
+              const SizedBox(height: 16),
+              RgCard(
+                margin: EdgeInsets.zero,
+                child: _Field(controller: _id, label: 'Number', keyboard: TextInputType.number, onSubmit: _open),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 8),
+                Text(_error!, style: RgType.footnote.copyWith(color: c.dangerFg)),
+              ],
+              const SizedBox(height: 16),
+              RgButton(label: 'Open Workspace', size: BtnSize.lg, expand: true, onPressed: _open),
               const SizedBox(height: 8),
-              Text(_error!, style: RgType.footnote.copyWith(color: c.dangerFg)),
+              RgButton(label: 'Sign Out', variant: BtnVariant.ghost, onPressed: s.signOut),
             ],
-            const SizedBox(height: 16),
-            RgButton(label: 'Open Workspace', size: BtnSize.lg, expand: true, onPressed: _open),
-            const SizedBox(height: 8),
-            RgButton(label: 'Sign Out', variant: BtnVariant.ghost, onPressed: s.signOut),
-          ]),
+          ),
         ),
       );
     }
     return Scaffold(
       body: SafeArea(
-        child: ListView(children: [
-          const Padding(padding: EdgeInsets.fromLTRB(16, 36, 16, 8), child: LargeTitle('Workspace')),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Text('Choose the property you are working at.',
-                style: RgType.subhead.copyWith(color: c.textSecondary)),
-          ),
-          RgCard(
-            child: Column(children: [
-              for (final (i, t) in s.tenants.indexed)
-                Pressable(
-                  pressedColor: c.surfaceSunken,
-                  onTap: () => s.selectTenant(t),
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 14),
-                    child: Container(
-                      decoration: i < s.tenants.length - 1 ? hairlineBottom(context) : null,
-                      padding: const EdgeInsets.fromLTRB(0, 13, 14, 13),
-                      child: Row(children: [
-                        Expanded(child: Text(t.name, style: RgType.body.copyWith(color: c.textPrimary))),
-                        RgIcon(Symbols.chevron_right_rounded, color: c.textTertiary),
-                      ]),
+        child: ListView(
+          children: [
+            const Padding(padding: EdgeInsets.fromLTRB(16, 36, 16, 8), child: LargeTitle('Workspace')),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Text(
+                'Choose the property you are working at.',
+                style: RgType.subhead.copyWith(color: c.textSecondary),
+              ),
+            ),
+            RgCard(
+              child: Column(
+                children: [
+                  for (final (i, t) in s.tenants.indexed)
+                    Pressable(
+                      pressedColor: c.surfaceSunken,
+                      onTap: () => s.selectTenant(t),
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 14),
+                        child: Container(
+                          decoration: i < s.tenants.length - 1 ? hairlineBottom(context) : null,
+                          padding: const EdgeInsets.fromLTRB(0, 13, 14, 13),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(t.name, style: RgType.body.copyWith(color: c.textPrimary)),
+                              ),
+                              RgIcon(Symbols.chevron_right_rounded, color: c.textTertiary),
+                            ],
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-            ]),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: RgButton(label: 'Sign Out', variant: BtnVariant.ghost, onPressed: s.signOut),
-          ),
-        ]),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: RgButton(label: 'Sign Out', variant: BtnVariant.ghost, onPressed: s.signOut),
+            ),
+          ],
+        ),
       ),
     );
   }

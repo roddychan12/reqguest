@@ -1,6 +1,7 @@
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
 
@@ -10,6 +11,7 @@ import '../../theme/tokens.dart';
 import '../components/ds.dart';
 import 'alerts.dart';
 import 'chat.dart';
+import 'new_request.dart';
 import 'profile.dart';
 import 'requests.dart';
 import 'team.dart';
@@ -29,8 +31,15 @@ class _HomeShellState extends State<HomeShell> {
     context.read<AppState>().onIncoming = _incoming;
   }
 
+  /// New request pop-up. Off shift: stay quiet (the request still appears in the list).
   void _incoming(Req r) {
     if (!mounted) return;
+    final s = context.read<AppState>();
+    if (!s.onShift) return;
+    if (s.alertSound) {
+      SystemSound.play(SystemSoundType.alert);
+      HapticFeedback.mediumImpact();
+    }
     Toaster.show(
       context,
       'New request · ${r.chatName} · ${r.chatTitle}',
@@ -42,9 +51,24 @@ class _HomeShellState extends State<HomeShell> {
 
   void _go(int i) => setState(() => _tab = i);
 
+  /// Opens the new-request form; on success, goes straight to the new request's chat.
+  Future<void> _newRequest() async {
+    final result = await Navigator.of(
+      context,
+    ).push<Object?>(MaterialPageRoute(fullscreenDialog: true, builder: (_) => const NewRequestScreen()));
+    if (!mounted || result == null) return;
+    if (result is Req) {
+      Toaster.show(context, 'Request created · ${result.referenceNo}', tone: ToastTone.success);
+      openChat(context, result);
+    } else {
+      Toaster.show(context, 'Request created', tone: ToastTone.success);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
+    final c = RgColors.of(context);
     final pages = [
       RequestsScreen(onOpenProfile: () => _go(3)),
       const AlertsScreen(),
@@ -54,6 +78,22 @@ class _HomeShellState extends State<HomeShell> {
     return Scaffold(
       extendBody: true,
       body: IndexedStack(index: _tab, children: pages),
+      // Sits above the right end of the tab bar (over "You"), on the Requests tab only.
+      floatingActionButton: _tab == 0
+          ? FloatingActionButton.extended(
+              heroTag: 'new-request',
+              tooltip: 'New request',
+              onPressed: _newRequest,
+              backgroundColor: c.brand,
+              foregroundColor: c.textOnPrimary,
+              elevation: 4,
+              highlightElevation: 6,
+              shape: const StadiumBorder(),
+              icon: RgIcon(Symbols.add_rounded, size: 24, weight: 600, color: c.textOnPrimary),
+              label: const Text('New', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            )
+          : null,
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
       bottomNavigationBar: _TabBar(index: _tab, onTap: _go, badges: [s.unreadChats, s.unreadAlerts, 0, 0]),
     );
   }
@@ -148,59 +188,65 @@ class _TabBar extends StatelessWidget {
 
   Widget _item(RgColors c, int i, (IconData, String) item) {
     final (icon, label) = item;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => onTap(i),
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Stack(
-              clipBehavior: Clip.none,
-              children: [
-                RgIcon(
-                  icon,
-                  size: 26,
-                  fill: i == index,
-                  weight: i == index ? 500 : 400,
-                  color: i == index ? c.brand : c.textTertiary,
-                ),
-                if (badges[i] > 0)
-                  Positioned(
-                    top: -3,
-                    left: 16,
-                    child: Container(
-                      constraints: const BoxConstraints(minWidth: 18),
-                      height: 18,
-                      padding: const EdgeInsets.symmetric(horizontal: 5),
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(color: c.dangerSolid, borderRadius: BorderRadius.circular(9)),
-                      child: Text(
-                        '${badges[i]}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          height: 1,
-                          fontFeatures: RgType.tabular,
+    return Semantics(
+      button: true,
+      selected: i == index,
+      label: badges[i] > 0 ? '$label, ${badges[i]} unread' : label,
+      excludeSemantics: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => onTap(i),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  RgIcon(
+                    icon,
+                    size: 26,
+                    fill: i == index,
+                    weight: i == index ? 500 : 400,
+                    color: i == index ? c.brand : c.textTertiary,
+                  ),
+                  if (badges[i] > 0)
+                    Positioned(
+                      top: -3,
+                      left: 16,
+                      child: Container(
+                        constraints: const BoxConstraints(minWidth: 18),
+                        height: 18,
+                        padding: const EdgeInsets.symmetric(horizontal: 5),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(color: c.dangerSolid, borderRadius: BorderRadius.circular(9)),
+                        child: Text(
+                          '${badges[i]}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            height: 1,
+                            fontFeatures: RgType.tabular,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 1),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 10,
-                height: 1.2,
-                fontWeight: FontWeight.w500,
-                letterSpacing: 0.1,
-                color: i == index ? c.textBrand : c.textTertiary,
+                ],
               ),
-            ),
-          ],
+              const SizedBox(height: 1),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 10,
+                  height: 1.2,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.1,
+                  color: i == index ? c.textBrand : c.textTertiary,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

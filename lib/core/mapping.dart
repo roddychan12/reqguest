@@ -88,9 +88,15 @@ DateTime? parseDate(dynamic v) {
   if (v == null) return null;
   final s = v.toString();
   if (s.isEmpty) return null;
-  // Server returns "YYYY-MM-DD HH:MM:SS" in tenant local time.
-  return DateTime.tryParse(s.contains('T') ? s : s.replaceFirst(' ', 'T'));
+  // Server returns "YYYY-MM-DD HH:MM:SS" in UTC (the CMS reads it the same way).
+  // Times without a zone are taken as UTC, then shown in the phone's local time.
+  var iso = s.trim().replaceFirst(' ', 'T');
+  if (!iso.contains('T')) iso = '${iso}T00:00:00';
+  if (!_hasZone.hasMatch(iso)) iso = '${iso}Z';
+  return DateTime.tryParse(iso)?.toLocal();
 }
+
+final _hasZone = RegExp(r'(Z|[+-]\d{2}(:?\d{2})?)$');
 
 bool _sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
 

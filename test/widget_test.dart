@@ -77,7 +77,7 @@ void main() {
     });
     expect(status.kind, EventKind.status);
     expect(status.toStatusName, 'Assigned');
-    expect(status.at, DateTime(2026, 4, 9, 7, 45));
+    expect(status.at, DateTime.utc(2026, 4, 9, 7, 45).toLocal());
   });
 
   test('request rows parse integer priority and requester as chat name', () {
@@ -93,5 +93,17 @@ void main() {
     expect(r.chatName, 'Room 515');
     expect(r.chatTitle, 'AC not cooling');
     expect(r.isHighPriority, isTrue);
+  });
+
+  test('server times are UTC and shown in local time', () {
+    final utc = DateTime.utc(2026, 11, 13, 10, 30);
+    expect(parseDate('2026-11-13 10:30:00'), utc.toLocal());
+    expect(parseDate('2026-11-13T10:30:00'), utc.toLocal());
+    expect(parseDate('2026-11-13T10:30:00Z'), utc.toLocal());
+    expect(parseDate('2026-11-13T16:00:00+05:30'), utc.toLocal());
+    expect(parseDate('2026-11-13'), DateTime.utc(2026, 11, 13).toLocal());
+    expect(parseDate('2026-11-13 10:30:00')!.isUtc, isFalse);
+    expect(parseDate(''), isNull);
+    expect(parseDate(null), isNull);
   });
 }

@@ -1,11 +1,11 @@
 {
-    "name": "reqguest",
-    "short_name": "reqguest",
+    "name": "ReqGuest",
+    "short_name": "ReqGuest",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0B0B0B",
     "theme_color": "#0B0B0B",
-    "description": "A new Flutter project.",
+    "description": "ReqGuest: guest requests as staff chats for hotel teams.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

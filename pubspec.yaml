@@ -1,5 +1,5 @@
 name: reqguest
-description: "A new Flutter project."
+description: "ReqGuest: guest requests as staff chats for hotel teams."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -43,6 +43,7 @@ dependencies:
   material_symbols_icons: ^4.2960.0
   http_parser: ^4.1.2
   url_launcher: ^6.3.2
+  flutter_secure_storage: ^11.2.0
 
 dev_dependencies:
   flutter_test:
