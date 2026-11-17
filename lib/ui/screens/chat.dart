@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
@@ -125,7 +126,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final s = _s;
     // The navigator outlives this screen, so Undo still works after going back.
     final nav = Navigator.of(context);
+    // The first step on a new request (e.g. Accept Request) also makes it yours.
+    final claims = s.assigneeOf(r.id) == null && !isCancelTransition(t.name);
     await _run(() async {
+      if (claims) await s.pick(r);
       await s.applyTransition(r, t, note: _noteFor(t));
       if (!mounted) return;
       final to = s.statuses[t.toStatusId];
@@ -135,8 +139,9 @@ class _ChatScreenState extends State<ChatScreen> {
         '${r.chatName} · ${to?.name ?? t.name}',
         tone: fin ? ToastTone.success : ToastTone.neutral,
         icon: fin ? Symbols.check_circle_rounded : Symbols.swap_horiz_rounded,
-        actionLabel: 'Undo',
-        onAction: () => mounted ? _run(() => s.undoTransition(r, t)) : _undoAway(nav, s, r, t),
+        // Accepting cannot be undone: undoing the status would leave it yours with nothing to undo the claim.
+        actionLabel: claims ? null : 'Undo',
+        onAction: claims ? null : () => mounted ? _run(() => s.undoTransition(r, t)) : _undoAway(nav, s, r, t),
       );
       _scrollToEnd();
     });
@@ -282,6 +287,109 @@ class _ChatScreenState extends State<ChatScreen> {
     };
   }
 
+  /// Press-and-hold menu on a message or photo: copy, open, delete.
+  Future<void> _eventActions(Req r, ChatEvent e) async {
+    final s = _s;
+    final isMedia = e.kind == EventKind.attach;
+    final url = isMedia ? s.attachmentUrl(e) : null;
+    final canDelete = s.canDelete(e) && s.canMessage(r);
+    if (e.isDeleted || (!isMedia && (e.body ?? '').isEmpty && !canDelete)) return;
+    HapticFeedback.selectionClick();
+    final choice = await showRgSheet<String>(
+      context,
+      title: isMedia ? (e.fileName ?? 'Attachment') : (e.isInternal ? 'Internal note' : 'Message'),
+      builder: (ctx) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!isMedia && (e.body ?? '').isNotEmpty) ...[
+            RgButton(
+              label: 'Copy Text',
+              icon: Symbols.content_copy_rounded,
+              variant: BtnVariant.secondary,
+              size: BtnSize.lg,
+              onPressed: () => Navigator.pop(ctx, 'copy'),
+            ),
+            const SizedBox(height: 8),
+          ],
+          if (url != null) ...[
+            RgButton(
+              label: 'Open',
+              icon: Symbols.open_in_new_rounded,
+              variant: BtnVariant.secondary,
+              size: BtnSize.lg,
+              onPressed: () => Navigator.pop(ctx, 'open'),
+            ),
+            const SizedBox(height: 8),
+          ],
+          if (canDelete) ...[
+            RgButton(
+              label: 'Delete',
+              icon: Symbols.delete_rounded,
+              variant: BtnVariant.danger,
+              size: BtnSize.lg,
+              onPressed: () => Navigator.pop(ctx, 'delete'),
+            ),
+            const SizedBox(height: 8),
+          ],
+          RgButton(label: 'Close', variant: BtnVariant.ghost, size: BtnSize.lg, onPressed: () => Navigator.pop(ctx)),
+        ],
+      ),
+    );
+    if (!mounted || choice == null) return;
+    switch (choice) {
+      case 'copy':
+        await Clipboard.setData(ClipboardData(text: e.body ?? ''));
+        if (mounted) Toaster.show(context, 'Copied', icon: Symbols.content_copy_rounded);
+      case 'open':
+        _openMedia(context, url!, e, video: isVideo(e.mimeType));
+      case 'delete':
+        await _confirmDelete(r, e);
+    }
+  }
+
+  Future<void> _confirmDelete(Req r, ChatEvent e) async {
+    final isMedia = e.kind == EventKind.attach;
+    final what = isMedia ? (isVideo(e.mimeType) ? 'video' : 'photo') : (e.isInternal ? 'note' : 'message');
+    final ok = await showRgSheet<bool>(
+      context,
+      title: 'Delete this $what?',
+      builder: (ctx) {
+        final c = RgColors.of(ctx);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'It will be removed from this chat for everyone, including the CMS. This cannot be undone.',
+              style: RgType.subhead.copyWith(color: c.textSecondary),
+            ),
+            const SizedBox(height: 16),
+            RgButton(
+              label: 'Delete',
+              icon: Symbols.delete_rounded,
+              variant: BtnVariant.danger,
+              size: BtnSize.lg,
+              expand: true,
+              onPressed: () => Navigator.pop(ctx, true),
+            ),
+            const SizedBox(height: 8),
+            RgButton(
+              label: 'Keep',
+              variant: BtnVariant.ghost,
+              size: BtnSize.lg,
+              expand: true,
+              onPressed: () => Navigator.pop(ctx, false),
+            ),
+          ],
+        );
+      },
+    );
+    if (ok != true || !mounted) return;
+    final done = await _run(() => _s.deleteEvent(r, e));
+    if (done && mounted) {
+      Toaster.show(context, '${what[0].toUpperCase()}${what.substring(1)} deleted', tone: ToastTone.success);
+    }
+  }
+
   void _details(Req r) {
     final s = _s;
     final copy = Copy(s);
@@ -375,7 +483,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _Header(req: r, backBadge: others, onBack: () => Navigator.pop(context), onInfo: () => _details(r)),
           Expanded(
             child: loaded
-                ? _Messages(req: r, events: list, controller: _scroll)
+                ? _Messages(req: r, events: list, controller: _scroll, onHold: (e) => _eventActions(r, e))
                 : s.eventsFailed(r.id)
                 ? EmptyState(
                     icon: Symbols.cloud_off_rounded,
@@ -427,7 +535,7 @@ class _Header extends StatelessWidget {
       child: SafeArea(
         bottom: false,
         child: SizedBox(
-          height: 56,
+          height: 68,
           child: Padding(
             padding: const EdgeInsets.only(left: 2, right: 8),
             child: Row(
@@ -475,8 +583,8 @@ class _Header extends StatelessWidget {
                     behavior: HitTestBehavior.opaque,
                     child: Row(
                       children: [
-                        GlyphAvatar(icon: copy.typeIcon(req), tint: copy.tint(context, req), size: 38, iconSize: 21),
-                        const SizedBox(width: 10),
+                        GlyphAvatar(icon: copy.typeIcon(req), tint: copy.tint(context, req), size: 44, iconSize: 24),
+                        const SizedBox(width: 12),
                         Expanded(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -494,6 +602,7 @@ class _Header extends StatelessWidget {
                                   fontFeatures: RgType.tabular,
                                 ),
                               ),
+                              const SizedBox(height: 3),
                               Text(
                                 copy.subline(req),
                                 maxLines: 1,
@@ -532,10 +641,13 @@ class _Header extends StatelessWidget {
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 class _Messages extends StatelessWidget {
-  const _Messages({required this.req, required this.events, required this.controller});
+  const _Messages({required this.req, required this.events, required this.controller, required this.onHold});
   final Req req;
   final List<ChatEvent> events;
   final ScrollController controller;
+
+  /// Long-press on a message or media bubble (copy / open / delete).
+  final ValueChanged<ChatEvent> onHold;
 
   @override
   Widget build(BuildContext context) {
@@ -548,11 +660,18 @@ class _Messages extends StatelessWidget {
         day = d;
       }
       items.add(switch (e.kind) {
+        _ when e.isDeleted => _DeletedBubble(event: e),
         EventKind.guest => _GuestCard(req: req, event: e),
         EventKind.status => _StatusPill(event: e),
         EventKind.assign => _AssignPill(event: e),
-        EventKind.comment => _CommentBubble(event: e),
-        EventKind.attach => _AttachBubble(event: e),
+        EventKind.comment => GestureDetector(
+          onLongPress: () => onHold(e),
+          child: _CommentBubble(event: e),
+        ),
+        EventKind.attach => GestureDetector(
+          onLongPress: () => onHold(e),
+          child: _AttachBubble(event: e),
+        ),
       });
     }
     // Reversed so the list opens at the latest message, like WhatsApp.
@@ -840,6 +959,71 @@ class _CommentBubble extends StatelessWidget {
   }
 }
 
+/// What is left of a deleted message or photo: "This message was deleted", like WhatsApp,
+/// with who deleted it when it was someone else.
+class _DeletedBubble extends StatelessWidget {
+  const _DeletedBubble({required this.event});
+  final ChatEvent event;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = context.watch<AppState>();
+    final c = RgColors.of(context);
+    final mine = event.by != null && event.by == s.me?.userId;
+    final what = event.kind == EventKind.attach ? 'photo' : 'message';
+    final by = event.deletedBy;
+    final text = by == null || by == event.by
+        ? (mine ? 'You deleted this $what' : 'This $what was deleted')
+        : 'This $what was deleted by ${s.whoOf(by, short: false)}';
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 290),
+        padding: const EdgeInsets.fromLTRB(10, 7, 10, 6),
+        decoration: BoxDecoration(
+          color: Colors.transparent,
+          borderRadius: mine ? _tailRight : _tailLeft,
+          border: Border.all(color: c.borderDefault),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!mine)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Text(
+                  s.nameOf(event.by),
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: c.textSecondary),
+                ),
+              ),
+            Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    RgIcon(Symbols.block_rounded, size: 16, color: c.textTertiary),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        text,
+                        style: RgType.callout.copyWith(color: c.textTertiary, fontStyle: FontStyle.italic),
+                      ),
+                    ),
+                  ],
+                ),
+                Text(hhmm(event.at), style: _meta(c)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Meta extends StatelessWidget {
   const _Meta({required this.at, required this.mine, this.pending = false});
   final DateTime at;
@@ -1064,6 +1248,8 @@ class _BottomBar extends StatelessWidget {
     final closed = s.isFinal(req);
     final hasText = input.text.trim().isNotEmpty;
 
+    if (!s.canMessage(req)) return _viewOnly(context, s, closed);
+
     return Glass(
       top: true,
       child: SafeArea(
@@ -1186,6 +1372,64 @@ class _BottomBar extends StatelessWidget {
     );
   }
 
+  /// Shown instead of the actions and chat box on a request a colleague picked up.
+  Widget _viewOnly(BuildContext context, AppState s, bool closed) {
+    final c = RgColors.of(context);
+    final who = s.assigneeOf(req.id);
+    final name = who == null ? 'A colleague' : s.nameOf(who);
+    return Glass(
+      top: true,
+      child: SafeArea(
+        top: false,
+        minimum: const EdgeInsets.only(bottom: 8),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (closed) ...[_closedLine(context, s), const SizedBox(height: 8)],
+              Semantics(
+                label: '$name is handling this request. View only.',
+                child: Container(
+                  constraints: const BoxConstraints(minHeight: 44),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: c.surfaceCard,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: c.borderDefault),
+                  ),
+                  child: Row(
+                    children: [
+                      RgIcon(Symbols.visibility_rounded, size: 20, color: c.textSecondary),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: closed ? '$name handled this' : '$name is handling this',
+                                style: TextStyle(fontWeight: FontWeight.w600, color: c.textPrimary),
+                              ),
+                              TextSpan(text: ' · View only', style: TextStyle(color: c.textSecondary)),
+                            ],
+                          ),
+                          style: const TextStyle(fontSize: 14),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      RgIcon(Symbols.lock_rounded, size: 18, color: c.textTertiary),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _closedLine(BuildContext context, AppState s) {
     final c = RgColors.of(context);
     final st = s.statusOf(req);
@@ -1202,13 +1446,25 @@ class _BottomBar extends StatelessWidget {
   }
 
   Widget _actions(BuildContext context, AppState s) {
-    final ts = s.transitionsFor(req);
+    final unassigned = s.assigneeOf(req.id) == null;
+    // A new request shows its first workflow step (e.g. "Accept Request"); taking it
+    // also claims the request, so there is no separate Pick Up step. Staff only get
+    // the forward steps until it is theirs; after that, only the owner sees buttons.
+    final List<WfTransition> ts;
+    if (s.canManage(req)) {
+      ts = s.transitionsFor(req);
+    } else if (unassigned) {
+      ts = s.transitionsFor(req).where((t) => !isCancelTransition(t.name) && !isHoldTransition(t.name)).toList();
+    } else {
+      ts = const [];
+    }
     final forward = ts.where((t) => !isCancelTransition(t.name)).toList();
     final primary = forward.where((t) => !isHoldTransition(t.name)).firstOrNull ?? forward.firstOrNull;
     final cancels = ts.where((t) => isCancelTransition(t.name));
     final ordered = [?primary, ...forward.where((t) => t != primary), ...cancels];
-    final unassigned = s.assigneeOf(req.id) == null;
-    if (ordered.isEmpty && !unassigned) return const SizedBox.shrink();
+    // A workflow with no step out of its first status still needs a way to take the request.
+    final acceptOnly = ordered.isEmpty && unassigned;
+    if (ordered.isEmpty && !acceptOnly) return const SizedBox.shrink();
     return SizedBox(
       height: 34,
       child: ListView(
@@ -1227,12 +1483,11 @@ class _BottomBar extends StatelessWidget {
             ),
             const SizedBox(width: 8),
           ],
-          if (unassigned)
+          if (acceptOnly)
             RgButton(
-              label: 'Pick Up',
-              icon: Symbols.front_hand_rounded,
+              label: 'Accept Request',
+              icon: Symbols.check_circle_rounded,
               size: BtnSize.sm,
-              variant: ordered.isEmpty ? BtnVariant.primary : BtnVariant.outline,
               onPressed: busy ? null : onPick,
             ),
         ],

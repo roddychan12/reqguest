@@ -7,6 +7,7 @@ import '../../state/app_state.dart';
 import '../../theme/tokens.dart';
 import '../components/ds.dart';
 import '../copy.dart';
+import 'gate.dart';
 import 'home.dart';
 
 class AlertsScreen extends StatelessWidget {
@@ -26,8 +27,7 @@ class AlertsScreen extends StatelessWidget {
     return RefreshIndicator(
       color: c.textBrand,
       onRefresh: () => refreshWithToast(context, s.refresh),
-      child: ListView(
-        padding: EdgeInsets.zero,
+      child: PoweredByList(
         children: [
           SafeArea(
             bottom: false,
@@ -83,7 +83,6 @@ class AlertsScreen extends StatelessWidget {
                 ),
               ),
             ],
-          const BottomBarSpacer(),
         ],
       ),
     );

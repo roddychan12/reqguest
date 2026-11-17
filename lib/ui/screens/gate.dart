@@ -96,10 +96,14 @@ class SignInScreen extends StatefulWidget {
 }
 
 class _SignInScreenState extends State<SignInScreen> {
-  late final _server = TextEditingController(text: context.read<AppState>().api.baseUrl);
+  // Pre-filled only on a device that has signed in before; a first-time user
+  // starts with an empty, visible Property field and must fill it in.
+  late final String? _savedProperty = propertyOf(context.read<AppState>().api.savedBaseUrl ?? '');
+  late final _server = TextEditingController(text: _savedProperty ?? '');
   final _email = TextEditingController();
   final _password = TextEditingController();
-  bool _busy = false, _showServer = false;
+  bool _busy = false;
+  late bool _showServer = _savedProperty == null;
   String? _error;
 
   @override
@@ -110,27 +114,26 @@ class _SignInScreenState extends State<SignInScreen> {
     super.dispose();
   }
 
-  /// A usable server address, or null. An empty field means the default server.
-  String? _serverUrl() {
-    final raw = _server.text.trim();
-    if (raw.isEmpty) return kDefaultApiBase;
-    final uri = Uri.tryParse(raw);
-    if (uri == null || !(uri.scheme == 'https' || uri.scheme == 'http') || uri.host.isEmpty) return null;
-    return raw;
-  }
-
   Future<void> _submit() async {
     if (_busy) return;
-    if (_email.text.trim().isEmpty || _password.text.isEmpty) {
-      setState(() => _error = 'Enter your email and password.');
+    final property = _server.text.trim();
+    if (property.isEmpty) {
+      setState(() {
+        _showServer = true;
+        _error = 'Enter your property name.';
+      });
       return;
     }
-    final server = _serverUrl();
+    final server = propertyUrl(property);
     if (server == null) {
       setState(() {
         _showServer = true;
-        _error = 'Enter the server address in full, for example https://hotel.example.com';
+        _error = 'Enter the property name only, for example dev-hotel4 (letters, numbers and hyphens).';
       });
+      return;
+    }
+    if (_email.text.trim().isEmpty || _password.text.isEmpty) {
+      setState(() => _error = 'Enter your email and password.');
       return;
     }
     setState(() {
@@ -163,71 +166,134 @@ class _SignInScreenState extends State<SignInScreen> {
     final c = RgColors.of(context);
     return Scaffold(
       body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Center(child: Logo(height: 40)),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Staff sign in',
-                    textAlign: TextAlign.center,
-                    style: RgType.subhead.copyWith(color: c.textSecondary),
-                  ),
-                  const SizedBox(height: 32),
-                  RgCard(
-                    margin: EdgeInsets.zero,
+        child: Column(
+          children: [
+            Expanded(
+              child: Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 420),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _Field(controller: _email, label: 'Email', keyboard: TextInputType.emailAddress),
-                        const Padding(padding: EdgeInsets.only(left: 14), child: Hairline()),
-                        _Field(controller: _password, label: 'Password', obscure: true, onSubmit: _submit),
-                        if (_showServer) ...[
-                          const Padding(padding: EdgeInsets.only(left: 14), child: Hairline()),
-                          _Field(controller: _server, label: 'Server', keyboard: TextInputType.url),
+                        const Center(child: Logo(height: 40)),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Staff sign in',
+                          textAlign: TextAlign.center,
+                          style: RgType.subhead.copyWith(color: c.textSecondary),
+                        ),
+                        const SizedBox(height: 32),
+                        RgCard(
+                          margin: EdgeInsets.zero,
+                          child: Column(
+                            children: [
+                              _Field(controller: _email, label: 'Email', keyboard: TextInputType.emailAddress),
+                              const Padding(padding: EdgeInsets.only(left: 14), child: Hairline()),
+                              _Field(controller: _password, label: 'Password', obscure: true, onSubmit: _submit),
+                              if (_showServer) ...[
+                                const Padding(padding: EdgeInsets.only(left: 14), child: Hairline()),
+                                _Field(
+                                  controller: _server,
+                                  label: 'Property',
+                                  keyboard: TextInputType.url,
+                                  hint: 'dev-hotel4',
+                                  onSubmit: _submit,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        if (_error != null) ...[
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              RgIcon(Symbols.error_rounded, size: 18, fill: true, color: c.dangerFg),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(_error!, style: RgType.footnote.copyWith(color: c.dangerFg)),
+                              ),
+                            ],
+                          ),
                         ],
-                      ],
-                    ),
-                  ),
-                  if (_error != null) ...[
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        RgIcon(Symbols.error_rounded, size: 18, fill: true, color: c.dangerFg),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(_error!, style: RgType.footnote.copyWith(color: c.dangerFg)),
+                        const SizedBox(height: 20),
+                        RgButton(label: 'Sign In', size: BtnSize.lg, expand: true, loading: _busy, onPressed: _submit),
+                        const SizedBox(height: 8),
+                        RgButton(
+                          label: _showServer ? 'Hide Property' : 'Change Property',
+                          variant: BtnVariant.ghost,
+                          size: BtnSize.sm,
+                          onPressed: () => setState(() => _showServer = !_showServer),
                         ),
                       ],
                     ),
-                  ],
-                  const SizedBox(height: 20),
-                  RgButton(label: 'Sign In', size: BtnSize.lg, expand: true, loading: _busy, onPressed: _submit),
-                  const SizedBox(height: 8),
-                  RgButton(
-                    label: _showServer ? 'Hide server' : 'Change server',
-                    variant: BtnVariant.ghost,
-                    size: BtnSize.sm,
-                    onPressed: () => setState(() => _showServer = !_showServer),
                   ),
-                ],
+                ),
               ),
             ),
-          ),
+            const Padding(padding: EdgeInsets.only(bottom: 16), child: PoweredBy()),
+          ],
         ),
       ),
     );
   }
 }
 
+/// A scrolling page that ends with "Powered by HeroApps" just above the tab bar.
+/// Short content: the text sits at the bottom of the screen. Long content: it is
+/// the last item, seen once scrolled to the end.
+class PoweredByList extends StatelessWidget {
+  const PoweredByList({super.key, required this.children});
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomScrollView(
+      slivers: [
+        SliverList.list(children: children),
+        const SliverFillRemaining(
+          hasScrollBody: false,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              Padding(padding: EdgeInsets.only(top: 20), child: PoweredBy()),
+              BottomBarSpacer(),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// "Powered by HeroApps", shown at the bottom of the sign-in and list pages.
+class PoweredBy extends StatelessWidget {
+  const PoweredBy({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = RgColors.of(context);
+    return Text(
+      'Powered by HeroApps',
+      textAlign: TextAlign.center,
+      style: TextStyle(fontSize: 12, color: c.textTertiary),
+    );
+  }
+}
+
 class _Field extends StatelessWidget {
-  const _Field({required this.controller, required this.label, this.obscure = false, this.keyboard, this.onSubmit});
+  const _Field({
+    required this.controller,
+    required this.label,
+    this.obscure = false,
+    this.keyboard,
+    this.onSubmit,
+    this.hint,
+  });
   final TextEditingController controller;
   final String label;
+  final String? hint;
   final bool obscure;
   final TextInputType? keyboard;
   final VoidCallback? onSubmit;
@@ -253,7 +319,7 @@ class _Field extends StatelessWidget {
               style: RgType.body.copyWith(color: c.textPrimary),
               decoration: InputDecoration(
                 border: InputBorder.none,
-                hintText: label == 'Server' ? 'https://host' : null,
+                hintText: hint,
                 hintStyle: TextStyle(color: c.textTertiary),
               ),
             ),

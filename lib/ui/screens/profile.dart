@@ -7,6 +7,7 @@ import '../../state/app_state.dart';
 import '../../theme/tokens.dart';
 import '../components/ds.dart';
 import 'gate.dart';
+import 'team.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -42,7 +43,6 @@ class ProfileScreen extends StatelessWidget {
 
     final account = <(String, String)>[
       ('Email', me.email ?? '–'),
-      ('Phone', me.phone ?? '–'),
       ('Department', dept ?? '–'),
       ('Workspace', s.tenant?.name ?? '–'),
       ('Time zone', s.tenant?.timezone ?? me.timezone ?? '–'),
@@ -76,6 +76,36 @@ class ProfileScreen extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ),
+        const SectionHeader('Menu', padding: EdgeInsets.fromLTRB(16, 22, 16, 6)),
+        RgCard(
+          child: Pressable(
+            pressedColor: c.surfaceSunken,
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TeamScreen())),
+            child: Container(
+              constraints: const BoxConstraints(minHeight: 50),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(
+                children: [
+                  RgIcon(Symbols.groups_rounded, size: 24, color: c.textBrand),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Team', style: RgType.body.copyWith(color: c.textPrimary)),
+                        Text(
+                          dept == null ? 'People in your department' : 'People in $dept',
+                          style: RgType.footnote.copyWith(color: c.textSecondary),
+                        ),
+                      ],
+                    ),
+                  ),
+                  RgIcon(Symbols.chevron_right_rounded, color: c.textTertiary),
+                ],
+              ),
+            ),
           ),
         ),
         const SectionHeader('Status', padding: EdgeInsets.fromLTRB(16, 22, 16, 6)),

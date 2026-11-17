@@ -12,8 +12,7 @@ import 'gate.dart';
 import 'home.dart';
 
 class RequestsScreen extends StatefulWidget {
-  const RequestsScreen({super.key, required this.onOpenProfile});
-  final VoidCallback onOpenProfile;
+  const RequestsScreen({super.key});
 
   @override
   State<RequestsScreen> createState() => _RequestsScreenState();
@@ -46,9 +45,9 @@ class _RequestsScreenState extends State<RequestsScreen> {
     final s = context.watch<AppState>();
     final c = RgColors.of(context);
     final searching = _search.text.trim().isNotEmpty;
-    // While searching, closed chats are included so nothing is hidden.
-    // Chip counts use the same search as the list, so a count never promises rows that are not there.
-    final base = (searching ? s.sorted(s.visible) : s.openChats).where((r) => _matches(s, r)).toList();
+    // Only requests this user handles or may accept; teammates' are under Team Requests,
+    // closed ones under Closed. Chip counts use the same search as the list.
+    final base = s.myChats.where((r) => _matches(s, r)).toList();
     final unread = base.where((r) => s.unreadCount(r) > 0).length;
     final mine = base.where((r) => s.assigneeOf(r.id) == s.me?.userId).length;
     final rows = base.where((r) {
@@ -88,22 +87,7 @@ class _RequestsScreenState extends State<RequestsScreen> {
                             RgIcon(Symbols.cloud_off_rounded, size: 18, color: c.warningFg),
                             const SizedBox(width: 4),
                             Text('Offline', style: TextStyle(fontSize: 13, color: c.warningFg)),
-                            const SizedBox(width: 12),
                           ],
-                          Semantics(
-                            button: true,
-                            label: 'Profile and settings',
-                            excludeSemantics: true,
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: widget.onOpenProfile,
-                              child: const SizedBox(
-                                width: 44,
-                                height: 32,
-                                child: Center(child: RgIcon(Symbols.more_horiz_rounded)),
-                              ),
-                            ),
-                          ),
                         ],
                       ),
                     ),
@@ -195,8 +179,12 @@ class _RequestsScreenState extends State<RequestsScreen> {
               itemCount: rows.length,
               itemBuilder: (_, i) => ChatRow(req: rows[i]),
             ),
-          SliverToBoxAdapter(child: _Footer()),
-          const SliverToBoxAdapter(child: BottomBarSpacer(extra: 64)),
+          // Few requests: the footer fills the leftover space and sits at the bottom, just above the tab bar.
+          // Many requests: it is simply the last thing in the list, seen once scrolled to the end.
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [_Footer(), const BottomBarSpacer()]),
+          ),
         ],
       ),
     );
@@ -206,15 +194,15 @@ class _RequestsScreenState extends State<RequestsScreen> {
 class _Footer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    final c = RgColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
+    return const Padding(
+      padding: EdgeInsets.fromLTRB(16, 20, 16, 0),
+      child: Column(
         children: [
-          RgIcon(Symbols.lock_rounded, size: 14, color: c.textTertiary),
-          const SizedBox(width: 4),
-          Text('Internal notes are visible to staff only', style: TextStyle(fontSize: 12, color: c.textTertiary)),
+          // Room for the New button, which sits just above the text (see HomeShell),
+          // so it never covers the last request.
+          SizedBox(height: 72),
+          // Last thing in the list, just above the tab bar.
+          PoweredBy(),
         ],
       ),
     );
@@ -317,7 +305,7 @@ class ClosedScreen extends StatelessWidget {
                   ? const EmptyState(
                       icon: Symbols.inventory_2_rounded,
                       title: 'Nothing closed yet',
-                      message: 'Finished requests move here.',
+                      message: 'Closed requests move here automatically.',
                     )
                   : ListView.builder(
                       itemCount: rows.length,
@@ -332,8 +320,11 @@ class ClosedScreen extends StatelessWidget {
 }
 
 class ChatRow extends StatelessWidget {
-  const ChatRow({super.key, required this.req});
+  const ChatRow({super.key, required this.req, this.showHandler = false});
   final Req req;
+
+  /// Adds a "Handled by …" line (Team Requests).
+  final bool showHandler;
 
   @override
   Widget build(BuildContext context) {
@@ -440,6 +431,23 @@ class ChatRow extends StatelessWidget {
                         ],
                       ],
                     ),
+                    if (showHandler && s.assigneeOf(req.id) != null) ...[
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          RgIcon(Symbols.person_rounded, size: 16, color: c.textTertiary),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              'Handled by ${s.nameOf(s.assigneeOf(req.id))}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: RgType.footnote.copyWith(color: c.textTertiary),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                   ],
                 ),
               ),

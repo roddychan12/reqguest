@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:reqguest/core/api.dart';
 import 'package:reqguest/core/mapping.dart';
 import 'package:reqguest/models/models.dart';
 import 'package:reqguest/theme/tokens.dart';
@@ -105,5 +106,31 @@ void main() {
     expect(parseDate('2026-11-13 10:30:00')!.isUtc, isFalse);
     expect(parseDate(''), isNull);
     expect(parseDate(null), isNull);
+  });
+
+  test('soft-deleted comments are marked deleted', () {
+    final live = ChatEvent.fromComment({'id': 1, 'user_id': 2, 'body': 'hi', 'created_at': '2026-11-16 09:41:00'});
+    final gone = ChatEvent.fromComment({
+      'id': 2,
+      'user_id': 2,
+      'body': 'Shall i start',
+      'created_at': '2026-11-16 09:41:00',
+      'deleted_at': '2026-11-16 09:42:00',
+      'deleted_by': 2,
+    });
+    expect(live.isDeleted, isFalse);
+    expect(gone.isDeleted, isTrue);
+    expect(gone.deletedBy, 2);
+  });
+
+  test('property name builds the hasuite.ai address', () {
+    expect(propertyUrl('dev-hotel4'), 'https://dev-hotel4.hasuite.ai');
+    expect(propertyUrl('  Dev-Hotel4 '), 'https://dev-hotel4.hasuite.ai');
+    expect(propertyUrl('dev-hotel4.hasuite.ai'), 'https://dev-hotel4.hasuite.ai');
+    expect(propertyUrl('https://dev-hotel4.hasuite.ai/'), 'https://dev-hotel4.hasuite.ai');
+    expect(propertyUrl('bad name'), isNull);
+    expect(propertyUrl('-x'), isNull);
+    expect(propertyOf('https://dev-hotel4.hasuite.ai'), 'dev-hotel4');
+    expect(propertyOf('https://example.com'), isNull);
   });
 }

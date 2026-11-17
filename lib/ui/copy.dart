@@ -40,7 +40,7 @@ class Copy {
       case 'auto':
         return 'Auto-assigned to $to';
       case 'pick':
-        return e.assignedTo == s.me?.userId ? 'You picked this up' : '${s.nameOf(e.assignedTo)} picked this up';
+        return e.assignedTo == s.me?.userId ? 'You accepted this request' : '${s.nameOf(e.assignedTo)} accepted this request';
       default:
         final by = e.by == s.me?.userId ? 'You' : s.whoOf(e.by);
         final note = e.note;
@@ -63,6 +63,10 @@ class Copy {
     final e = s.eventsFor(r.id).lastOrNull;
     if (e == null) return (null, r.description ?? r.chatTitle, false, false);
     final mine = _mine(e);
+    if (e.isDeleted) {
+      final what = e.kind == EventKind.attach ? 'photo' : 'message';
+      return (Symbols.block_rounded, mine ? 'You deleted this $what' : 'This $what was deleted', false, false);
+    }
     switch (e.kind) {
       case EventKind.guest:
         return (Symbols.concierge_rounded, r.description?.isNotEmpty == true ? r.description! : r.chatTitle, false, false);

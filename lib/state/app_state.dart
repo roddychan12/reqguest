@@ -536,11 +536,34 @@ class AppState extends ChangeNotifier {
         return r.departmentId == d ||
             (assignments[r.id] ?? const []).any((a) => a.unassignedAt == null && a.deptId == d);
       case AppRole.staff:
-        final who = assigneeOf(r.id);
-        // Own requests, plus unassigned ones in their department so they can pick them up.
-        return who == m.userId || (who == null && m.departmentId != null && r.departmentId == m.departmentId);
+        // Own requests, plus every request of their department. Requests someone
+        // else has picked up stay visible, but read-only (see [canManage]).
+        final d = m.departmentId;
+        if (assigneeOf(r.id) == m.userId) return true;
+        if (d == null) return false;
+        return r.departmentId == d ||
+            (assignments[r.id] ?? const []).any((a) => a.unassignedAt == null && a.deptId == d);
     }
   }
+
+  /// Whether this user may act on [r]: change its status, message, attach or delete.
+  /// Supervisors and admins always may. Staff may only once they have picked it up;
+  /// a request someone else picked up is read-only for them.
+  bool canManage(Req r) => switch (me?.role) {
+    AppRole.admin || AppRole.supervisor => true,
+    AppRole.staff => assigneeOf(r.id) == me?.userId,
+    null => false,
+  };
+
+  /// Whether [r] belongs to a colleague, so this user only views it.
+  bool isReadOnly(Req r) {
+    final who = assigneeOf(r.id);
+    return who != null && !canManage(r);
+  }
+
+  /// Whether the chat box is open: for whoever manages the request, and for
+  /// the department while nobody has picked it up yet.
+  bool canMessage(Req r) => canManage(r) || assigneeOf(r.id) == null;
 
   List<Req> get visible => _all.values.where(isVisible).toList();
 
@@ -548,7 +571,22 @@ class AppState extends ChangeNotifier {
 
   List<Req> sorted(Iterable<Req> list) => list.toList()..sort((a, b) => lastEventAt(b).compareTo(lastEventAt(a)));
 
+  /// Every open request this user can see, theirs or not (team counts use this).
   List<Req> get openChats => sorted(visible.where((r) => !isFinal(r)));
+
+  /// Requests tab: open requests this user is handling, plus unassigned ones anyone may accept.
+  List<Req> get myChats => openChats.where((r) {
+    final who = assigneeOf(r.id);
+    return who == null || who == me?.userId;
+  }).toList();
+
+  /// Team Requests tab: open requests a teammate is handling.
+  List<Req> get teamChats => openChats.where((r) {
+    final who = assigneeOf(r.id);
+    return who != null && who != me?.userId;
+  }).toList();
+
+  /// Closed: every closed request, whoever handled it.
   List<Req> get closedChats => sorted(visible.where(isFinal));
 
   List<ChatEvent> eventsFor(int id) {
@@ -566,13 +604,15 @@ class AppState extends ChangeNotifier {
   String nameOf(int? userId) {
     if (userId == null) return 'System';
     if (userId == me?.userId) return me!.name;
-    return userNames[userId] ?? 'User $userId';
+    // Names come from the user list; accounts that may not read it only know the id (as in the CMS).
+    return userNames[userId] ?? 'User #$userId';
   }
 
   String whoOf(int? userId, {bool short = true}) {
     if (userId != null && userId == me?.userId) return 'You';
     final n = nameOf(userId);
-    return short ? shortName(n) : n;
+    // Only real names are shortened ("Suresh Nair" → "Suresh N."), never the "User #5" fallback.
+    return short && userNames.containsKey(userId) ? shortName(n) : n;
   }
 
   /// Download address for an attachment. Media uploads store a full URL; direct
@@ -610,9 +650,9 @@ class AppState extends ChangeNotifier {
     final list = events[r.id] ?? const [];
     if (seen == null) {
       // Never opened: everything since creation counts, capped for sanity.
-      return list.where((e) => e.by != me?.userId).length.clamp(0, 99);
+      return list.where((e) => e.by != me?.userId && !e.isDeleted).length.clamp(0, 99);
     }
-    return list.where((e) => e.at.isAfter(seen) && e.by != me?.userId).length;
+    return list.where((e) => e.at.isAfter(seen) && e.by != me?.userId && !e.isDeleted).length;
   }
 
   /// Remembers the newest server event seen. Server times are compared only with
@@ -626,7 +666,8 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  int get unreadChats => openChats.where((r) => unreadCount(r) > 0).length;
+  int get unreadChats => myChats.where((r) => unreadCount(r) > 0).length;
+  int get unreadTeamChats => teamChats.where((r) => unreadCount(r) > 0).length;
 
   // ── Alerts ─────────────────────────────────────────────────────────────────
 
@@ -641,9 +682,12 @@ class AppState extends ChangeNotifier {
     final out = <Alert>[];
     final cutoff = DateTime.now().subtract(const Duration(days: 7));
     for (final r in visible) {
+      // Colleagues' requests are visible for reference but do not raise alerts.
+      if (isReadOnly(r)) continue;
       for (final e in eventsFor(r.id)) {
         if (e.at.isBefore(cutoff)) continue;
         if (e.by == me?.userId && e.kind != EventKind.assign) continue;
+        if (e.isDeleted) continue;
         out.add(Alert(r, e));
       }
     }
@@ -730,10 +774,40 @@ class AppState extends ChangeNotifier {
     markSeen(r);
   }
 
+  /// Picks [r] up. Checks the latest assignments first, so a request a colleague
+  /// took a moment ago is not taken over.
   Future<void> pick(Req r) async {
+    await loadEvents(r.id);
+    final who = assigneeOf(r.id);
+    if (who != null && who != me?.userId) {
+      notifyListeners();
+      throw ApiException(409, '${nameOf(who)} already accepted this request.');
+    }
     await api.rg('POST', '/requests/${r.id}/pick');
     await loadEvents(r.id);
     notifyListeners();
+  }
+
+  /// Own messages and media can be deleted; admins may delete anyone's (as in the CMS).
+  /// The server has the final say and may still refuse.
+  bool canDelete(ChatEvent e) =>
+      !e.pending &&
+      !e.isDeleted &&
+      e.id > 0 &&
+      (e.kind == EventKind.comment || e.kind == EventKind.attach) &&
+      ((e.by != null && e.by == me?.userId) || me?.role == AppRole.admin);
+
+  /// Deletes a comment or attachment. It disappears at once and comes back if the server refuses.
+  Future<void> deleteEvent(Req r, ChatEvent e) async {
+    final path = e.kind == EventKind.attach ? 'attachments' : 'comments';
+    events[r.id] = [...?events[r.id]]..removeWhere((x) => x.kind == e.kind && x.id == e.id);
+    notifyListeners();
+    try {
+      await api.rg('DELETE', '/requests/${r.id}/$path/${e.id}');
+    } finally {
+      await loadEvents(r.id);
+      notifyListeners();
+    }
   }
 
   Future<List<Location>> loadLocations() async {
@@ -813,6 +887,7 @@ class AppState extends ChangeNotifier {
   bool seesAllOf(int? deptId) => switch (me?.role) {
     AppRole.admin => true,
     AppRole.supervisor => me?.departmentId == null || me?.departmentId == deptId,
+    AppRole.staff => me?.departmentId != null && me?.departmentId == deptId,
     _ => false,
   };
 }

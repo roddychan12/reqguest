@@ -9,6 +9,30 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Default server; override with `--dart-define=API_BASE=https://host` or on the sign-in screen.
 const kDefaultApiBase = String.fromEnvironment('API_BASE', defaultValue: 'https://dev-hotel4.hasuite.ai');
 
+/// Every property lives at `https://<property>.hasuite.ai`.
+const kPropertyDomain = 'hasuite.ai';
+
+/// The property name in a server address ("dev-hotel4" for https://dev-hotel4.hasuite.ai),
+/// or null if the address is not a hasuite.ai property.
+String? propertyOf(String url) {
+  final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+  const suffix = '.$kPropertyDomain';
+  if (!host.endsWith(suffix)) return null;
+  final name = host.substring(0, host.length - suffix.length);
+  return name.isEmpty ? null : name;
+}
+
+/// The server address for what the user typed as the property: just a name
+/// ("dev-hotel4"), or a full hasuite.ai address pasted in. Null if it is not usable.
+String? propertyUrl(String input) {
+  var name = input.trim().toLowerCase();
+  if (name.contains('://')) name = Uri.tryParse(name)?.host ?? '';
+  name = name.replaceAll(RegExp(r'/+$'), '');
+  if (name.endsWith('.$kPropertyDomain')) name = name.substring(0, name.length - kPropertyDomain.length - 1);
+  if (!RegExp(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?$').hasMatch(name)) return null;
+  return 'https://$name.$kPropertyDomain';
+}
+
 /// Workspace opened for accounts that cannot list workspaces; `--dart-define=TENANT_ID=1`.
 const kDefaultTenantId = int.fromEnvironment('TENANT_ID');
 
@@ -81,8 +105,12 @@ class ApiClient {
   String get baseUrl => _prefs.getString('api_base') ?? kDefaultApiBase;
   set baseUrl(String v) {
     final clean = v.trim().replaceAll(RegExp(r'/+$'), '');
-    clean.isEmpty || clean == kDefaultApiBase ? _prefs.remove('api_base') : _prefs.setString('api_base', clean);
+    clean.isEmpty ? _prefs.remove('api_base') : _prefs.setString('api_base', clean);
   }
+
+  /// The address of the property this device last signed in to, or null on a
+  /// device that has never signed in.
+  String? get savedBaseUrl => _prefs.getString('api_base');
 
   String? get accessToken => _accessToken;
   int? get tenantId => _prefs.getInt('tenant_id');

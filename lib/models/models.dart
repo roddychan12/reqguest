@@ -182,6 +182,8 @@ class ChatEvent {
     this.mimeType,
     this.fileSize,
     this.pending = false,
+    this.deletedAt,
+    this.deletedBy,
   });
 
   final EventKind kind;
@@ -209,6 +211,12 @@ class ChatEvent {
 
   /// Optimistic message not yet confirmed by the server.
   final bool pending;
+
+  /// The server keeps deleted comments (soft delete) and marks them; they show as a
+  /// "deleted" placeholder, as in the CMS, instead of their content.
+  final DateTime? deletedAt;
+  final int? deletedBy;
+  bool get isDeleted => deletedAt != null;
 
   String get key => '${kind.name}:$id';
 
@@ -262,6 +270,8 @@ class ChatEvent {
         body: _s(j['body']) ?? '',
         isInternal: _b(j['is_internal']),
         pending: pending,
+        deletedAt: parseDate(j['deleted_at']),
+        deletedBy: _i(j['deleted_by']),
       );
 
   static ChatEvent fromAttachment(Map<String, dynamic> j) => ChatEvent(
@@ -273,6 +283,8 @@ class ChatEvent {
         filePath: _s(j['file_path']),
         mimeType: _s(j['mime_type']),
         fileSize: _i(j['file_size']),
+        deletedAt: parseDate(j['deleted_at']),
+        deletedBy: _i(j['deleted_by']),
       );
 }
 

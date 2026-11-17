@@ -12,9 +12,9 @@ import '../components/ds.dart';
 import 'alerts.dart';
 import 'chat.dart';
 import 'new_request.dart';
+import 'team_requests.dart';
 import 'profile.dart';
 import 'requests.dart';
-import 'team.dart';
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
@@ -70,31 +70,39 @@ class _HomeShellState extends State<HomeShell> {
     final s = context.watch<AppState>();
     final c = RgColors.of(context);
     final pages = [
-      RequestsScreen(onOpenProfile: () => _go(3)),
+      const RequestsScreen(),
       const AlertsScreen(),
-      const TeamScreen(),
+      const TeamRequestsScreen(),
       const ProfileScreen(),
     ];
     return Scaffold(
       extendBody: true,
       body: IndexedStack(index: _tab, children: pages),
       // Sits above the right end of the tab bar (over "You"), on the Requests tab only.
+      // Raised so "Powered by HeroApps" fits between it and the tab bar.
       floatingActionButton: _tab == 0
-          ? FloatingActionButton.extended(
-              heroTag: 'new-request',
-              tooltip: 'New request',
-              onPressed: _newRequest,
-              backgroundColor: c.brand,
-              foregroundColor: c.textOnPrimary,
-              elevation: 4,
-              highlightElevation: 6,
-              shape: const StadiumBorder(),
-              icon: RgIcon(Symbols.add_rounded, size: 24, weight: 600, color: c.textOnPrimary),
-              label: const Text('New', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          ? Padding(
+              padding: const EdgeInsets.only(bottom: 24),
+              child: FloatingActionButton.extended(
+                heroTag: 'new-request',
+                tooltip: 'New request',
+                onPressed: _newRequest,
+                backgroundColor: c.brand,
+                foregroundColor: c.textOnPrimary,
+                elevation: 4,
+                highlightElevation: 6,
+                shape: const StadiumBorder(),
+                icon: RgIcon(Symbols.add_rounded, size: 24, weight: 600, color: c.textOnPrimary),
+                label: const Text('New', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              ),
             )
           : null,
       floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-      bottomNavigationBar: _TabBar(index: _tab, onTap: _go, badges: [s.unreadChats, s.unreadAlerts, 0, 0]),
+      bottomNavigationBar: _TabBar(
+        index: _tab,
+        onTap: _go,
+        badges: [s.unreadChats, s.unreadAlerts, s.unreadTeamChats, 0],
+      ),
     );
   }
 }
@@ -111,7 +119,7 @@ class _TabBar extends StatelessWidget {
   static const _items = [
     (Symbols.forum_rounded, 'Requests'),
     (Symbols.notifications_rounded, 'Alerts'),
-    (Symbols.groups_rounded, 'Team'),
+    (Symbols.diversity_3_rounded, 'Team Requests'),
     (Symbols.account_circle_rounded, 'You'),
   ];
 
@@ -123,61 +131,61 @@ class _TabBar extends StatelessWidget {
     final c = RgColors.of(context);
     final dark = Theme.of(context).brightness == Brightness.dark;
     final radius = BorderRadius.circular(_height / 2);
-    return SafeArea(
-      top: false,
-      minimum: const EdgeInsets.only(bottom: 10),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            borderRadius: radius,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: dark ? 0.4 : 0.12),
-                blurRadius: 24,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: ClipRRect(
-            borderRadius: radius,
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-              child: Container(
-                height: _height,
-                padding: const EdgeInsets.all(_inset),
-                decoration: BoxDecoration(
-                  color: c.surfaceGlass,
-                  borderRadius: radius,
-                  border: Border.all(
-                    color: (dark ? Colors.white : Colors.black).withValues(alpha: dark ? 0.12 : 0.06),
-                    width: 0.5,
-                  ),
+    return SafeArea(top: false, minimum: const EdgeInsets.only(bottom: 10), child: _pill(context, c, dark, radius));
+  }
+
+  Widget _pill(BuildContext context, RgColors c, bool dark, BorderRadius radius) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: radius,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: dark ? 0.4 : 0.12),
+              blurRadius: 24,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: radius,
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+            child: Container(
+              height: _height,
+              padding: const EdgeInsets.all(_inset),
+              decoration: BoxDecoration(
+                color: c.surfaceGlass,
+                borderRadius: radius,
+                border: Border.all(
+                  color: (dark ? Colors.white : Colors.black).withValues(alpha: dark ? 0.12 : 0.06),
+                  width: 0.5,
                 ),
-                child: LayoutBuilder(
-                  builder: (context, box) {
-                    final w = box.maxWidth / _items.length;
-                    return Stack(
-                      children: [
-                        AnimatedPositioned(
-                          duration: const Duration(milliseconds: 280),
-                          curve: Curves.easeOutCubic,
-                          left: w * index,
-                          top: 0,
-                          bottom: 0,
-                          width: w,
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: (dark ? Colors.white : Colors.black).withValues(alpha: dark ? 0.12 : 0.06),
-                              borderRadius: BorderRadius.circular((_height - _inset * 2) / 2),
-                            ),
+              ),
+              child: LayoutBuilder(
+                builder: (context, box) {
+                  final w = box.maxWidth / _items.length;
+                  return Stack(
+                    children: [
+                      AnimatedPositioned(
+                        duration: const Duration(milliseconds: 280),
+                        curve: Curves.easeOutCubic,
+                        left: w * index,
+                        top: 0,
+                        bottom: 0,
+                        width: w,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: (dark ? Colors.white : Colors.black).withValues(alpha: dark ? 0.12 : 0.06),
+                            borderRadius: BorderRadius.circular((_height - _inset * 2) / 2),
                           ),
                         ),
-                        Row(children: [for (final (i, item) in _items.indexed) Expanded(child: _item(c, i, item))]),
-                      ],
-                    );
-                  },
-                ),
+                      ),
+                      Row(children: [for (final (i, item) in _items.indexed) Expanded(child: _item(c, i, item))]),
+                    ],
+                  );
+                },
               ),
             ),
           ),
